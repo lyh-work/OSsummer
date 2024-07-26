@@ -432,3 +432,37 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
     return -1;
   }
 }
+
+void 
+subvmprint(pagetable_t pagetable, int dot) {
+    if (dot > 3)    return;
+
+    for(int i = 0; i < 512; i++) {
+        pte_t pte = pagetable[i];
+        if(pte & PTE_V) {
+            // 打点
+            for (int j = 0; j < dot; ++j) {
+                if (j != 0)    printf(" ");
+                printf("..");
+            }
+
+            // 打印索引
+            printf("%d: ", i);
+
+            // 打印 pte
+            printf("pte %p ", pte);
+
+            // 打印 pa
+            uint64 child = PTE2PA(pte);// 提取 PTE 里面的物理地址
+            printf("pa %p\n", child);
+            subvmprint((pagetable_t)child, dot + 1);
+        }
+    }
+}
+
+void 
+vmprint(pagetable_t pagetable) {
+    printf("page table %p\n", pagetable);
+
+    subvmprint(pagetable, 1);
+}

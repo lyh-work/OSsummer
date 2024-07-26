@@ -96,6 +96,9 @@ struct proc {
   // wait_lock must be held when using this:
   struct proc *parent;         // Parent process
 
+  // 新增一个成员变量保存 struct usyscall 结构体
+  struct usyscall *share;
+
   // these are private to the process, so p->lock need not be held.
   uint64 kstack;               // Virtual address of kernel stack
   uint64 sz;                   // Size of process memory (bytes)
