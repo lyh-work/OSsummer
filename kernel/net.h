@@ -12,6 +12,8 @@ struct mbuf {
   char         buf[MBUF_SIZE]; // the backing store
 };
 
+void net_rx(struct mbuf *);// 需要声明这个函数，不然 receiver 无法找到进入网络栈的函数签名
+
 char *mbufpull(struct mbuf *m, unsigned int len);
 char *mbufpush(struct mbuf *m, unsigned int len);
 char *mbufput(struct mbuf *m, unsigned int len);

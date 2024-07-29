@@ -102,7 +102,34 @@ e1000_transmit(struct mbuf *m)
   // the TX descriptor ring so that the e1000 sends it. Stash
   // a pointer so that it can be freed after sending.
   //
-  
+  // mbuf 包含了一个以太网帧，编程使 mbuf 送入 tx 描述符环
+  // 而使 E1000 可以发送出去
+  // 储存一个指针以便发送完后释放它
+
+  acquire(&e1000_lock);
+
+  // 获取 tx 环索引
+  // 这是 E1000 期待的待发送数据包所在的描述符索引
+  uint32 idx = regs[E1000_TDT]; 
+
+  // 检查环溢出，并释放上一次传输完的 mbuf
+  if ((tx_ring[idx].status & E1000_TXD_STAT_DD) == 0) {
+      release(&e1000_lock);
+      return -1;
+  }
+  if (tx_mbufs[idx])
+      mbuffree(tx_mbufs[idx]);
+
+  // 填充描述符
+  tx_ring[idx].addr = (uint64)m->head;
+  tx_ring[idx].length = m->len;
+  tx_ring[idx].cmd = E1000_TXD_CMD_RS
+                          | E1000_TXD_CMD_EOP;
+  tx_mbufs[idx] = m;// stash away the pointer to the mbuf
+
+  // 更新环位置
+  regs[E1000_TDT] = (regs[E1000_TDT] + 1) % TX_RING_SIZE;
+  release(&e1000_lock);
   return 0;
 }
 
@@ -115,6 +142,41 @@ e1000_recv(void)
   // Check for packets that have arrived from the e1000
   // Create and deliver an mbuf for each packet (using net_rx()).
   //
+  // 检查已经到达 E1000 的包
+  // 使用 net_rx() 为每个包送入 E1000
+
+  while (1) {
+      acquire(&e1000_lock);
+
+      // 获取 RX 索引
+      // 如果当前描述符还未有数据到达，需要后移即加一模除
+      // 因为一开始这个描述符肯定为空，那么随着 E1000 不断接收
+      // 数据包————即写入数据，头指针会赶上尾指针
+      // 而当尾指针等于头指针时，硬件视为队列空————即已经没有
+      // 地方再接收数据包了
+      // 如果读到当前描述符空却不后移，那么每次循环都会读到空，
+      // 那么 E1000 就再也无法接收数据包
+      uint32 idx = (regs[E1000_RDT] + 1) % RX_RING_SIZE;
+
+      // 判断包是否可用，即 E100 是否真的写入数据包了
+      if ((rx_ring[idx].status & E1000_RXD_STAT_DD) == 0) {
+      release(&e1000_lock);
+      return;
+      }
+
+      // 更新包缓冲区（mbuf），即填充 mbuf 结构体，并推送网络栈
+      rx_mbufs[idx]->len = rx_ring[idx].length;
+      release(&e1000_lock);
+      net_rx(rx_mbufs[idx]);
+
+      // 为刚才的 mbuf 新分配空间
+      rx_mbufs[idx] = mbufalloc(0);
+      rx_ring[idx].addr = (uint64)rx_mbufs[idx]->head;
+      rx_ring[idx].status = 0;
+
+      // 更新尾指针，更新为最后处理的环描述符的索引
+      regs[E1000_RDT] = idx;
+    }
 }
 
 void
