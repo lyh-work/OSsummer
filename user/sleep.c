@@ -1,5 +1,5 @@
-#include "kernel/types.h" // 引入声明类型的头文件
-#include "user/user.h" // 引入声明系统调用的头文件
+#include "kernel/types.h" 
+#include "user/user.h" 
 
 int main(int argc, char *argv[])
 {

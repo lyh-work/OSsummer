@@ -3,53 +3,70 @@
 #include "kernel/param.h"
 #include "user/user.h"
 
-#define BUFSIZE 30
-
 int
 main(int argc, char *argv[]) {
-  int i;
-  int j = 0;
-  int pid;
-  char buf[BUFSIZE];
-  char *inst_args[MAXARG];
-  for (i = 1; i < argc; i++) {
-    inst_args[i - 1] = (char*)malloc(BUFSIZE);
-    inst_args[i - 1] = argv[i];
-  }
-  i = argc - 1;
-  while ((read(0, &buf[j], 1)) > 0) {
-    if (buf[j] == ' ') {
-      buf[j] = 0;
-      inst_args[i] = (char*)malloc(BUFSIZE);
-      memmove(inst_args[i], buf, j);
-      j = 0;
-      i++;
-      continue;
-    } else if (buf[j] == '\n') {
-      buf[j] = 0;
-      inst_args[i] = (char*)malloc(BUFSIZE);
-      memmove(inst_args[i], buf, j);
-      pid = fork();
-      if (pid < 0) {
-        fprintf(2, "fork error\n");
-        exit(1);
-      } else if (pid == 0) {
-        exec(inst_args[0], inst_args);
-        exit(0);
-      } else {
-        // pid > 0
-        for (j = argc - 1; j < i + 1; j++) {
-          // reset inst_args
-          inst_args[j] = 0;
-        }
-        i = argc - 1;
-        j = 0;
-        wait(&pid);
-        continue;
-      }
-    }
-    j++;
-  }
+    char buf[512];
+    // 重新定义 argv[]->xargv[]
+    char *xargv[MAXARG + 3];// xargs + exec + MAXARG(32个) + 0 结尾
+    for (int i = 0; i < argc; ++i)   
+        xargv[i] = argv[i];
 
-  exit(0);
-} 
+    // 暂存 stdin 至 buf[]
+    int i = 0;
+    for (; i < sizeof(buf);) {
+        char c;
+        int n = read(0, &c, 1);
+        if (n < 0)    
+            exit(1);
+        else if (n == 0)    
+            break;
+        buf[i++] = c;
+    }
+    buf[--i] = 0;// fd0 最后一个字符是回车，我这里覆盖掉，即改 CR->'\0'
+    if (buf[0] == '"') {
+        // 这块程序作用是："1\n2"->1\n2; "1\n2"hi"->"1\n2"
+        // (只简单地取走前两个引号之间的字符，即使后面还有多的引号均忽略)
+        int i = 1;
+        for (; buf[i] != '"'; ++i)    buf[i - 1] = buf[i];
+        buf[i] = 0;
+        buf[i - 1] = 0;
+
+        // 转化转义字符，但只处理 \n
+        int size = strlen(buf);
+        for (i = 0; i < size; ++i) {
+            if (buf[i] == '\\'&& buf[i + 1] == 'n') {
+                buf[i] = 0x0A;  // ASCII 0x0a = 回车
+                memmove(&buf[i + 1], &buf[i + 2], size - i - 2);
+                buf[size - 1] = 0;
+                --size;
+            }
+        }
+    }
+
+    // buf[] 追加到 xargv[]
+    char *p = buf;
+    for (i = 0; i < strlen(buf) && argc < MAXARG + 2; ++i) {
+        int j = 0;
+        for (; i < strlen(buf); ++i, ++j)
+            if (buf[i] == ' ' || buf[i] == '\n')    
+                break;
+        xargv[argc] = malloc(j + 1);
+        memmove(xargv[argc], p, j);
+        xargv[argc++][j] = 0;
+        p = p + j + 1;
+    }
+    xargv[argc] = 0;
+
+    // 将 xargv[] 移交 exec)
+    int pid = fork();
+    if (pid < 0) {
+        fprintf(2, "xargs: cannot xargs\n");
+        exit(1);
+    } else if (pid > 0) {
+        wait(0);
+        exit(0);
+    } else {
+        exec(xargv[1], &xargv[1]);// xargv[0] 只是 "xargs"，所以取再后一个
+        exit(1);// exec 是不会返回的，唯一会返回的情况是出错了
+    }
+}
