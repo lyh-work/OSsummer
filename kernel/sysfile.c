@@ -484,3 +484,193 @@ sys_pipe(void)
   }
   return 0;
 }
+
+// mmap(虚拟地址, 映射长度, 权限, 写回, fd, 偏移)
+uint64
+sys_mmap(void) {
+    uint64 va;
+    int len, prot, flags, fd, off;
+
+    if(argaddr(0, &va) < 0)    return -1;
+    if (argint(1, &len) < 0 || argint(2, &prot) < 0
+        || argint(3, &flags) < 0 || argint(4, &fd) < 0)
+        return -1;
+    if (argint(5, &off) < 0)    return -1;
+
+    // 检查参数
+    struct proc *p = myproc();
+    if (len <= 0)    return -1;
+    if (p->ofile[fd] == 0)    return -1;// fd 代表的打开文件不存在
+    else    filedup(p->ofile[fd]);// 否则增加一次引用
+    if (p->ofile[fd]->writable == 0// 不可写文件映射可写属性
+        && (prot & PROT_WRITE) == PROT_WRITE
+        && (flags & MAP_SHARED) == MAP_SHARED)    return -1;
+
+    // 分配 vma 结构体
+    int i;
+    for (i = 0; i < MAXVMA; ++i) {
+        if (p->vma[i].valid == 0) {
+            p->vma[i].valid = 1;
+            break;
+        }
+    }
+    if (i == MAXVMA)    return -1;// vma 数组没有空闲位置
+
+    // 填充 vma
+    p->vma[i].va = p->curend - len;// 分配一个虚拟地址
+    p->curend = p->vma[i].va;// 同时修正下一个虚拟地址
+    p->vma[i].len = len;
+    uint pteflags = 0;// 以下几句赋值 PTE 权限
+    if ((prot & PROT_READ) == PROT_READ)    pteflags |= PTE_R;
+    if ((prot & PROT_WRITE) == PROT_WRITE)    pteflags |= PTE_W;
+    p->vma[i].prot = pteflags;
+    p->vma[i].flags = flags;
+    p->vma[i].fd = fd;
+    p->vma[i].off = off;
+    p->vma[i].f = p->ofile[fd];
+
+    return (uint64)p->vma[i].va;
+}
+
+uint64
+sys_munmap(void) {
+    uint64 va;
+    int len;
+
+    if(argaddr(0, &va) < 0)    return -1;
+    if (argint(1, &len) < 0)    return -1;
+
+    // 因为 exit() 也要 unmap，所以主体逻辑封装为另一个函数
+    if (subunmap(va, len) == -1)    return -1;
+
+    return 0; 
+}
+
+// 因为头文件问题
+// usertrap() 处理逻辑要写在包含 file.h 的文件里
+uint64
+pgfault(uint64 va) {
+    struct proc *p = myproc();
+    struct vma_t *v = 0;
+    // 寻找出对应的 vma 元素
+    for (int i = 0; i < MAXVMA; ++i) {
+        if (p->vma[i].valid == 1 && p->vma[i].va <= va
+            && va <= p->vma[i].va + p->vma[i].len) {
+            v = &p->vma[i];
+            break;
+        }
+    }
+    if (v == 0)    return -1;
+
+    // 分配一页
+    // 安装映射
+    // 将文件 4096B 写入（使用 readi()）
+    uint64 pa = (uint64)kalloc();
+    if (pa == 0)    return -1;
+    memset((char *)pa, 0, PGSIZE);
+
+    // 由于等会 readi() 是从 inode 读数据，输出至用户地址 va
+    // 所以要先建立用户地址 va 到物理地址 pa 的映射
+    if (mappages(p->pagetable, va, PGSIZE, pa, v->prot|PTE_U) == -1) {
+        kfree((void *)pa);
+        return -1;
+    }
+    // inode 数据写入 va
+    ilock(v->f->ip);
+    int ret = readi(v->f->ip, 1, va, v->off + va - v->va, PGSIZE);
+    if (ret == -1) {
+        kfree((void *)pa);
+        iunlock(v->f->ip);
+        return -1;
+    }
+    iunlock(v->f->ip);
+
+    return 0;
+}
+
+uint64
+subunmap(uint64 va, int len) {
+    if (len == 0)    return 0;
+    struct proc *p = myproc();
+    struct vma_t *v = 0;
+    // 寻找出对应的 vma 元素
+    for (int i = 0; i < MAXVMA; ++i) {
+        if (p->vma[i].valid == 1 && p->vma[i].va <= va
+            && va <= p->vma[i].va + p->vma[i].len) {
+            v = &p->vma[i];
+            break;
+        }
+    }
+    if (v == 0)    return -1;
+
+    // 检查 va 对应的映射
+    va = PGROUNDDOWN(va);
+    pte_t *pte = walk(p->pagetable, va, 0);// 第一个取消页的 pte
+    if (pte == 0)    return -1;
+    uint64 pteflags = PTE_FLAGS(*pte);// 第一个取消页的 pte flags
+    uint64 pa;
+    if ((pa = walkaddr(p->pagetable, va)) != 0) {
+        // 已安装映射，物理地址必存在，需要检查写回，再取消映射
+        // 未安装映射，什么都不用做
+        if (v->flags & MAP_SHARED) {
+            if ((pteflags & PTE_D) == PTE_D) {
+                int ret = filewrite(v->f, va, len);
+                if (ret == -1)    return -1;
+            }
+        }
+
+        // 取消映射
+        uvmunmap(p->pagetable, va, len / PGSIZE, 1);
+    }
+
+    // 依照文件是部分 unmap 还是全部 unmap，情况不同
+    // 判断是否是部分 unmap，可对比
+    //     1.  vma 起址是否等同本次 unmap 起址
+    //     2.  vma 长度是否等同本次 unmap 长度
+    // 上述情况两两组合共四种情况
+    if (v->va == va && v->len == len) {
+        // vma 起址 == un 起址，且 vma 长度 == un 长度
+        // 即完全 unmap 文件
+        v->len -= len;
+    } else if (v->va == va && v->len != len) {
+        // vma 起址 == un 起址，且 vma 长度 != un 长度
+        // 部分 unmap 文件，un 文件开头部分
+        v->va += len;
+        v->len -= len;
+    } else if (v->va != va && v->len == len) {
+        // vma 起址 != un 起址，且 vma 长度 == un 长度
+        // 这种情况不存在
+    } else if (v->va != va && v->len != len) {
+        // vma 起址 != un 起址，且 vma 长度 != un 长度
+        // 部分 unmap 文件，un 文件后面部分
+        v->len -= len;
+    }
+
+    if (v->len == 0) {
+        // 如果 unmap 整个文件
+        v->va = 0;
+        v->valid = 0;
+        fileclose(v->f);
+
+        // 调整 curend
+        if (va == p->curend) {
+        // 当最后一个文件 unmap
+        p->curend += len;
+        for (uint64 unva = PGROUNDDOWN(p->curend);
+                unva < MAXVA - 2 * PGSIZE; unva += PGSIZE) {
+            // 往上遍历每一个虚拟地址
+            int i;
+            for (i = 0; i < MAXVMA; ++i) {
+            // 判断是否在 vma 数组中存在
+            // 不存在的话，curend 上调
+            if (p->vma[i].va == unva && p->vma[i].valid == 1)
+                break;
+            }
+            if (i == MAXVMA)    p->curend += PGSIZE;// 不存在
+            else    break;// 只要上面的 vma 区域有一个没取消，就停止上调
+        }// end for()
+        }// end if()
+    }
+
+    return 0;
+}

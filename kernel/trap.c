@@ -67,7 +67,15 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
-  } else {
+  } else if(which_dev == 0 && (uint64)r_scause() == 13) {
+        // page-fault 时 scause 记录错误码；stval 记录无法翻译的 va
+        // riscv 三种 page-fault
+        // 13: load page-fault, 加载指令不能翻译它的虚拟地址
+        // 15: store page-fault, 存储指令不能翻译它的虚拟地址
+        // 12: instruction page-fault, PC 上的地址不能翻译
+        if (pgfault(PGROUNDDOWN(r_stval())) == -1)    
+          p->killed = 1;
+    } else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
     p->killed = 1;
