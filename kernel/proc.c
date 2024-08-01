@@ -121,13 +121,13 @@ found:
   p->pid = allocpid();
   p->state = USED;
 #ifdef LAB_PGTBL
-    // 创建一个 "只读页"，事实上没有创建页，这里只是简化的实现
-    if((p->share = (struct usyscall *)kalloc()) == 0){
-        freeproc(p);
-        release(&p->lock);
-        return 0;
-    }
-    p->share->pid = p->pid;
+  // 创建一个 "只读页"，事实上没有创建页，这里只是简化的实现
+  if((p->share = (struct usyscall *)kalloc()) == 0){
+      freeproc(p);
+      release(&p->lock);
+      return 0;
+  }
+  p->share->pid = p->pid;
 #endif
 
   // Allocate a trapframe page.
@@ -166,11 +166,11 @@ freeproc(struct proc *p)
   if(p->trapframe)
     kfree((void*)p->trapframe);
   p->trapframe = 0;
-  #ifdef LAB_PGTBL
-    if (p->share)
-        kfree((void *)p->share);
-    p->share = 0;
-  #endif
+#ifdef LAB_PGTBL
+  if (p->share)
+      kfree((void *)p->share);
+  p->share = 0;
+#endif
   if(p->pagetable)
     proc_freepagetable(p->pagetable, p->sz);
   p->pagetable = 0;
@@ -198,14 +198,14 @@ proc_pagetable(struct proc *p)
     return 0;
 
 #ifdef LAB_PGTBL
-    // 添加从 USYSCALL 到 struct proc 的成员变量 share 的映射
-    if(mappages(pagetable, USYSCALL, PGSIZE,
-                (uint64)(p->share), PTE_R | PTE_U) < 0){
-        uvmunmap(pagetable, USYSCALL, 1, 0);
-        uvmunmap(pagetable, TRAMPOLINE, 1, 0);
-        uvmfree(pagetable, 0);
-        return 0;
-    }
+  // 添加从 USYSCALL 到 struct proc 的成员变量 share 的映射
+  if(mappages(pagetable, USYSCALL, PGSIZE,
+              (uint64)(p->share), PTE_R | PTE_U) < 0){
+      uvmunmap(pagetable, USYSCALL, 1, 0);
+      uvmunmap(pagetable, TRAMPOLINE, 1, 0);
+      uvmfree(pagetable, 0);
+      return 0;
+  }
 #endif
 
   // map the trampoline code (for system call return)
@@ -235,7 +235,7 @@ void
 proc_freepagetable(pagetable_t pagetable, uint64 sz)
 {
 #ifdef LAB_PGTBL
-    uvmunmap(pagetable, USYSCALL, 1, 0);
+  uvmunmap(pagetable, USYSCALL, 1, 0);
 #endif
   uvmunmap(pagetable, TRAMPOLINE, 1, 0);
   uvmunmap(pagetable, TRAPFRAME, 1, 0);
